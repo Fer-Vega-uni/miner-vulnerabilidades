@@ -1,0 +1,38 @@
+# Entorno virtual de Python
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Carpeta donde se clonarán los repositorios (nombre por defecto)
+repos/
+
+# Excluir cualquier sub-repositorio clonado o git dentro de subdirectorios
+/*/.git/
+
+# Archivos de configuración local / variables de entorno (por si usas tokens en el futuro)
+.env
+.env.local
+.env.example
+
+# Archivos temporales y de caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+
+# Archivos de entorno de IDEs (VS Code, PyCharm, etc.)
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Archivos y carpetas temporales de CodeQL
+codeql_dbs/
+results_sarif/
+*.sarif
+resultados.json
