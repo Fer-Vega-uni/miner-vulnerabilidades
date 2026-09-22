@@ -36,3 +36,4 @@ codeql_dbs/
 results_sarif/
 *.sarif
 resultados.json
+sboms/

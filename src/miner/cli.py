@@ -1,75 +1,60 @@
-import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 import typer
 from rich.console import Console
 
 from miner.analizador_codeql import analizar_repositorio_para_codeql
 from miner.codeql_runner import run_codeql_analysis
-from miner.config import CODEQL_LANGUAGES, REPOS_DIR
+from miner.config import REPOS_DIR
 from miner.github_client import GitHubClient, GitHubClientError
-from miner.models import Finding, MinerReport, RepositoryResult, Summary
+from miner.models import MinerReport, RepositoryResult, Summary
+from miner.sbom_runner import generate_sbom
 
 app = typer.Typer(
-    help="Miner CLI: Automatiza el análisis estático con CodeQL en organizaciones de GitHub.",
+    help="Miner CLI: Automatiza análisis CodeQL y generación de SBOMs con Syft.",
     no_args_is_help=True,
 )
 console = Console()
 
 
-def clonar_repo(clone_url: str, repo_path: Path) -> bool:
-    """Clona un repositorio individual en la ruta especificada."""
+def get_commit_hash(repo_path: Path) -> str:
+    """Obtiene el hash del commit actual del repositorio clonado."""
     try:
-        subprocess.run(
-            ["git", "clone", "--quiet", clone_url, str(repo_path)],
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
             check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
         )
-        return True
+        return res.stdout.strip()
     except subprocess.CalledProcessError:
-        return False
+        return "unknown"
 
 
 @app.command(name="scan")
 def scan(
     organization: str = typer.Option(
-        ...,
-        "--organization",
-        "-o",
-        help="Nombre de la organización de GitHub a analizar.",
+        ..., "--organization", "-o", help="Nombre de la organización en GitHub."
     ),
     output: Path = typer.Option(
-        Path("results.json"),
-        "--output",
-        "-out",
-        help="Ruta del archivo JSON de salida.",
+        Path("results.json"), "--output", "-out", help="Ruta del JSON general."
+    ),
+    sbom_dir: Path = typer.Option(
+        Path("sboms"), "--sbom-dir", help="Directorio donde guardar los SBOMs."
+    ),
+    keep_repos: bool = typer.Option(
+        False, "--keep-repos", help="Conserva los repositorios clonados localmente."
     ),
 ):
-    """Ejecuta el pipeline completo de minería y análisis estático con CodeQL."""
-    console.print(
-        f"[bold blue]Iniciando escaneo para la organización:[/bold blue] {organization}"
-    )
-
+    """Ejecuta el pipeline de clonación, análisis CodeQL y generación de SBOMs."""
     try:
         client = GitHubClient()
-        console.print("[cyan]Obteniendo lista de repositorios...[/cyan]")
         repos_data = client.fetch_organization_repos(organization)
     except GitHubClientError as e:
-        console.print(f"[bold red]Error en la API de GitHub:[/bold red] {e}")
+        console.print(f"[bold red]Error en API de GitHub:[/bold red] {e}")
         raise typer.Exit(code=1)
-
-    if not repos_data:
-        console.print(
-            "[yellow]No se encontraron repositorios en la organización.[/yellow]"
-        )
-        raise typer.Exit(code=0)
-
-    console.print(
-        f"[green]Se encontraron {len(repos_data)} repositorios.[/green]\n"
-    )
 
     resultados_repos: list[RepositoryResult] = []
     base_repos_dir = Path(REPOS_DIR)
@@ -77,109 +62,134 @@ def scan(
 
     for idx, repo_info in enumerate(repos_data, 1):
         name = repo_info["name"]
+        full_name = repo_info.get("full_name", f"{organization}/{name}")
         clone_url = repo_info["clone_url"]
         html_url = repo_info["html_url"]
         repo_path = base_repos_dir / name
 
-        console.print(
-            f"[{idx}/{len(repos_data)}] [bold]Procesando:[bold] {name}..."
-        )
+        console.print(f"[{idx}/{len(repos_data)}] Procesando {full_name}...")
 
-        if repo_path.exists():
-            shutil.rmtree(repo_path, ignore_errors=True)
-
-        if not clonar_repo(clone_url, repo_path):
-            console.print(
-                "  └─ [red]Error:[red] No se pudo clonar el repositorio."
-            )
-            resultados_repos.append(
-                RepositoryResult(
-                    name=name,
-                    url=html_url,
-                    status="clone_failed",
-                    error_message="Error al clonar el repositorio vía Git CLI.",
+        # Clonar repo si no se reutiliza
+        if not repo_path.exists():
+            try:
+                subprocess.run(
+                    ["git", "clone", "--quiet", clone_url, str(repo_path)],
+                    check=True,
                 )
-            )
-            continue
+            except subprocess.CalledProcessError:
+                resultados_repos.append(
+                    RepositoryResult(
+                        name=name,
+                        full_name=full_name,
+                        url=html_url,
+                        status="clone_failed",
+                        error_message="No se pudo clonar el repositorio.",
+                    )
+                )
+                continue
 
+        commit_hash = get_commit_hash(repo_path)
+
+        # 1. Generar SBOM
+        sbom_info = generate_sbom(repo_path, sbom_dir)
+
+        # 2. Análisis CodeQL
         coincidencias, _ = analizar_repositorio_para_codeql(str(repo_path))
-
         if not coincidencias:
-            console.print(
-                "  └─ [yellow]Omitido:[yellow] Lenguajes no soportados por CodeQL."
-            )
             resultados_repos.append(
                 RepositoryResult(
                     name=name,
+                    full_name=full_name,
                     url=html_url,
+                    commit_hash=commit_hash,
                     status="unsupported",
-                    languages=[],
-                )
-            )
-            # Limpiar carpeta del repo clonado
-            shutil.rmtree(repo_path, ignore_errors=True)
-            continue
-
-        lenguaje_principal = max(coincidencias, key=coincidencias.get)
-        lenguajes_detectados = list(coincidencias.keys())
-
-        console.print(
-            f"  └─ Ejecutando CodeQL para lenguaje: [cyan]{lenguaje_principal}[cyan]..."
-        )
-
-        codeql_res = run_codeql_analysis(name, lenguaje_principal)
-
-        if codeql_res.status == "analyzed":
-            console.print(
-                f"  └─ [green]Éxito:[green] {len(codeql_res.findings)} hallazgo(s) encontrado(s)."
-            )
-            resultados_repos.append(
-                RepositoryResult(
-                    name=name,
-                    url=html_url,
-                    status="analyzed",
-                    languages=lenguajes_detectados,
-                    findings=codeql_res.findings,
+                    sbom=sbom_info,
                 )
             )
         else:
-            console.print(
-                f"  └─ [red]Error en CodeQL ({codeql_res.status}):[red] {codeql_res.error_message}"
-            )
+            lenguaje_principal = max(coincidencias, key=coincidencias.get)
+            codeql_res = run_codeql_analysis(name, lenguaje_principal)
+            
             resultados_repos.append(
                 RepositoryResult(
                     name=name,
+                    full_name=full_name,
                     url=html_url,
+                    commit_hash=commit_hash,
                     status=codeql_res.status,
-                    languages=lenguajes_detectados,
+                    languages=list(coincidencias.keys()),
+                    findings=codeql_res.findings,
                     error_message=codeql_res.error_message,
+                    sbom=sbom_info,
                 )
             )
 
-        if repo_path.exists():
+        # Limpiar repositorio si no se especificó la opción de conservarlo
+        if not keep_repos and repo_path.exists():
             shutil.rmtree(repo_path, ignore_errors=True)
 
+    # Consolidar informe
     reporte = MinerReport(
         organization=organization,
         summary=Summary(),
         repositories=resultados_repos,
     )
-
     reporte.organize_and_finalize()
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", encoding="utf-8") as f:
         f.write(reporte.model_dump_json(indent=2))
 
-    console.print(
-        "\n[bold green] Análisis completado exitosamente.[/bold green]"
+    console.print(f"[bold green]Proceso finalizado. Reporte:[/bold green] {output.resolve()}")
+
+
+@app.command(name="sbom-only")
+def sbom_only(
+    organization: str = typer.Option(..., "--organization", "-o"),
+    output: Path = typer.Option(Path("results.json"), "--output", "-out"),
+    sbom_dir: Path = typer.Option(Path("sboms"), "--sbom-dir"),
+):
+    """Genera SBOMs reutilizando repositorios ya clonados localmente sin ejecutar CodeQL."""
+    base_repos_dir = Path(REPOS_DIR)
+    if not base_repos_dir.exists():
+        console.print("[red]No se encontró el directorio de repositorios clonados.[/red]")
+        raise typer.Exit(code=1)
+
+    resultados_repos: list[RepositoryResult] = []
+
+    for repo_path in base_repos_dir.iterdir():
+        if repo_path.is_dir() and (repo_path / ".git").exists():
+            name = repo_path.name
+            full_name = f"{organization}/{name}"
+            commit_hash = get_commit_hash(repo_path)
+            
+            console.print(f"Generando SBOM para {name}...")
+            sbom_info = generate_sbom(repo_path, sbom_dir)
+
+            resultados_repos.append(
+                RepositoryResult(
+                    name=name,
+                    full_name=full_name,
+                    url=f"https://github.com/{full_name}",
+                    commit_hash=commit_hash,
+                    status="analyzed",
+                    sbom=sbom_info,
+                )
+            )
+
+    reporte = MinerReport(
+        organization=organization,
+        summary=Summary(),
+        repositories=resultados_repos,
     )
-    console.print(f"Reporte guardado en: [bold]{output.resolve()}[/bold]")
+    reporte.organize_and_finalize()
+
+    with open(output, "w", encoding="utf-8") as f:
+        f.write(reporte.model_dump_json(indent=2))
 
 
 @app.callback()
 def main():
-    """Herramienta de minería de datos y análisis de seguridad con CodeQL."""
     pass
 
 
