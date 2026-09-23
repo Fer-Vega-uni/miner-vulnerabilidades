@@ -1,4 +1,4 @@
-from miner.models import Finding, MinerReport, RepositoryResult, Summary
+from miner.models import Finding, MinerReport, RepositoryResult, SbomInfo, Summary
 
 
 def test_finding_creation():
@@ -13,10 +13,11 @@ def test_finding_creation():
     assert f.start_line == 10
 
 
-def test_report_sorting_and_summary():
+def test_report_sorting_and_summary_with_sbom():
     repo_b = RepositoryResult(
         name="repo-b",
-        url="https://github.com/org/repo-b",
+        full_name="test-org/repo-b",
+        url="https://github.com/test-org/repo-b",
         status="analyzed",
         findings=[
             Finding(
@@ -34,12 +35,23 @@ def test_report_sorting_and_summary():
                 start_line=5,
             ),
         ],
+        sbom=SbomInfo(
+            status="success",
+            components_count=5,
+            syft_version="1.52.0",
+        ),
     )
 
     repo_a = RepositoryResult(
         name="repo-a",
-        url="https://github.com/org/repo-a",
+        full_name="test-org/repo-a",
+        url="https://github.com/test-org/repo-a",
         status="unsupported",
+        sbom=SbomInfo(
+            status="success",
+            components_count=0,  # Caso de 0 componentes (ej. awesome-pdf)
+            syft_version="1.52.0",
+        ),
     )
 
     report = MinerReport(
@@ -54,11 +66,15 @@ def test_report_sorting_and_summary():
     assert report.repositories[0].name == "repo-a"
     assert report.repositories[1].name == "repo-b"
 
-    # Comprobar ordenamiento de hallazgos dentro de repo-b (a.py antes que z.py)
+    # Comprobar ordenamiento de hallazgos dentro de repo-b
     assert report.repositories[1].findings[0].file == "a.py"
 
-    # Comprobar cálculo del resumen
+    # Comprobar cálculo del resumen general
     assert report.summary.repositories == 2
     assert report.summary.analyzed == 1
     assert report.summary.unsupported == 1
     assert report.summary.findings == 2
+
+    # Comprobar métricas acumuladas de SBOM
+    assert report.summary.sboms_generated == 2
+    assert report.summary.total_components == 5
