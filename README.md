@@ -28,7 +28,7 @@ syft --version
 ## Estructura del Proyecto
 
 El código está organizado como un paquete modular en Python con separación de responsabilidades
-
+```text
 .
 ├── pyproject.toml
 ├── README.md
@@ -36,7 +36,7 @@ El código está organizado como un paquete modular en Python con separación de
 ├── .gitignore
 ├── src/
 │   └── miner/
-│       ├── init.py
+│       ├── __init__.py
 │       ├── analizador_codeql.py
 │       ├── cli.py
 │       ├── codeql_runner.py
@@ -46,8 +46,9 @@ El código está organizado como un paquete modular en Python con separación de
 │       ├── sarif_parser.py
 │       └── sbom_runner.py
 └── tests/
-├── test_models.py
-└── test_sarif_parser.py
+    ├── test_models.py
+    └── test_sarif_parser.py
+```
 ## Instalación
 
     Clonar el repositorio localmente:
@@ -138,5 +139,10 @@ Al verificar los SBOMs generados frente a los archivos de declaración de depend
 ## Ejecución de Pruebas Automatizadas
 
 El proyecto incluye un conjunto de pruebas unitarias implementadas con pytest para verificar el comportamiento de los modelos Pydantic y el procesamiento de archivos SARIF.
+
+
 Para ejecutar la suite de pruebas:
+
+```text
 pytest
+```
